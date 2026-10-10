@@ -1,6 +1,6 @@
 # agentic-sql
 
-Claude Code skill for **library-first SQL investigations**. Curated read-only query library + 3-layer safety gate (Postgres role isolation, SQLGlot AST check, LIMIT injection) + a forced post-investigation curation step that keeps the library from rotting.
+Claude Code skill for **library-first SQL investigations**. Curated read-only query library + SQL gate (read-only role, single-statement SQLGlot allow-list, LIMIT injection) + a forced post-investigation curation step that keeps the library from rotting.
 
 Works with any Postgres, any framework, any backend that you investigate via psql.
 
@@ -17,7 +17,7 @@ Every team with a Postgres production database has the same problem: AI agents (
 
 Curated SQL libraries solve this — they're standard practice in mature data orgs — but they only work if the agent CONSULTS the library before writing new SQL and CURATES new findings after the investigation succeeds. Without enforcement, both steps get skipped under time pressure. The library freezes; ad-hoc scripts pile up in `scripts/audit_*.py`; the next incident the team can't find the query they wrote three months ago.
 
-This skill makes both steps a non-negotiable part of the workflow: `find` before writing, `curate` before reporting back. Plus a 3-layer safety model that prevents the most common production accidents (running a query as the app role, executing a hallucinated DELETE, returning millions of rows by mistake).
+This skill makes both steps a non-negotiable part of the workflow: `find` before writing, `curate` before reporting back. Plus an SQL gate that prevents the most common production accidents (running a query as the app role, executing a hallucinated DELETE, returning millions of rows by mistake).
 
 ## First-Time Setup
 
@@ -30,8 +30,10 @@ On first invocation, the skill auto-extracts these from `CLAUDE.md` if present a
 | `{SCHEMA_DOC_PATH}` | Schema reference doc | `sql_library/SCHEMA.md` |
 | `{DB_ENVS}` | Named environments and their connection variables | (asks) |
 | `{READ_ONLY_ROLE}` | Postgres role with SELECT-only grants | `agentic_sql_ro` |
-| `{SAFE_PSQL_WRAPPER}` | Wrapper script that AST-gates + LIMIT-injects | `bin/safe_psql.sh` |
+| `{SAFE_PSQL_WRAPPER}` | Wrapper script that applies the SQL gate (you provide it) | `bin/safe_psql.sh` |
 | `{MAX_ROWS}` | Default LIMIT injected when query has none | `1000` |
+| `{STATEMENT_TIMEOUT}` | `statement_timeout` set on the read-only role | `30s` |
+| `{DISPLAY_ROWS}` | Rows shown before offering more | `50` |
 
 Values persist to `.claude/agentic-sql.yml` for the session.
 
@@ -56,7 +58,7 @@ Run once after install to verify the library / schema doc paths and surface any 
 | `/agentic-sql find <topic>` | Search the library index for queries matching `<topic>`. Returns ranked matches with their purpose, schema references, and parameters. **Always run this first.** |
 | `/agentic-sql audit` | Health-check the library: count queries, flag orphan `.sql` files not in the index, flag queries with no schema reference, list queries last touched > 90 days ago. |
 | `/agentic-sql add` | Guided workflow for saving a new query: prompts for purpose, business case, environment, schema reference, parameters; formats the header; saves to `{QUERY_DIR}` with `kebab-case-name.sql`; updates `{INDEX_PATH}`. |
-| `/agentic-sql run <query-id-or-path>` | Execute a saved query (by ID like `Q12`) or a freshly-written one. Wraps the call in `{SAFE_PSQL_WRAPPER}` which runs the AST gate, injects `LIMIT`, and connects as `{READ_ONLY_ROLE}`. |
+| `/agentic-sql run <query-id-or-path>` | Execute a saved query (by ID like `Q12`) or a freshly-written one. Wraps the call in `{SAFE_PSQL_WRAPPER}` which runs the SQL gate, injects `LIMIT`, and connects as `{READ_ONLY_ROLE}`. |
 | `/agentic-sql curate` | Post-investigation review. Surface any SQL run during this session that wasn't from the library, decide which are reusable, promote them via `add`. **Run before ending the conversation.** |
 | `/agentic-sql schema <table-or-section>` | View or update `{SCHEMA_DOC_PATH}` for a specific table or section. When adding a new query that touches a previously-undocumented table, run this FIRST to document the table, then add the query. |
 
@@ -79,7 +81,7 @@ These are the categories that tend to recur in real production work. Use them as
 
 1. **The library is a search corpus, not a folder.** If `find` doesn't surface the right query, the library failed even if the query exists.
 2. **The schema doc is the source of truth, not the live DB schema.** A `\d table` in psql gives you columns but no gotchas, no join keys, no "this counter drifts under condition X" notes. The doc accumulates institutional knowledge; the live schema only gives you syntax.
-3. **The 3-layer safety model is non-negotiable.** Read-only role at the Postgres level + AST gate at the application level + LIMIT injection at the wrapper level. Any one alone has been broken in production (CVE-2025-67644, recent LangGraph SQL injection).
+3. **The SQL gate is non-negotiable.** Read-only role at the Postgres level + single-statement allow-list parser at the application level + LIMIT injection at the wrapper level. Read-only transactions alone have been bypassed ([Datadog Security Labs, 2025-08-21](https://securitylabs.datadoghq.com/articles/mcp-vulnerability-case-study-SQL-injection-in-the-postgresql-mcp-server/)).
 4. **Curation runs before the final report.** Cemri et al. (arxiv 2503.13657) call this out as the #1 multi-agent failure: "diffusion of responsibility" — if curation isn't an explicit step, it becomes everyone's job and therefore nobody's job. The skill makes it a step.
 
 ## What NOT to do
@@ -109,7 +111,7 @@ agentic-sql/
 ## Key Principles
 
 1. **Library-first lookup is mandatory** — `find` always runs before new SQL gets written.
-2. **Three-layer safety, all required** — Postgres role + AST gate + LIMIT injection.
+2. **SQL gate, all layers required** — read-only role + parser allow-list + LIMIT injection.
 3. **Schema doc is the source of truth** — never guess columns; read the doc first.
 4. **Curation is part of the investigation** — it runs before the final report, not "later."
 5. **No field fallbacks** — never use one column as a substitute for another inside a query.
