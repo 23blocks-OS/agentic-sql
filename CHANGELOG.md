@@ -2,6 +2,11 @@
 
 All notable changes to this skill are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.2.1] - 2026-10-12
+
+### Changed
+- Commands and the prerequisite now use `safe-psql`, a launcher AI Maestro installs on the PATH that runs the wrapper in a private Python environment. The manual setup for use without AI Maestro is documented.
+
 ## [1.2.0] - 2026-10-10
 
 ### Added
