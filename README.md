@@ -30,7 +30,7 @@ On first invocation, the skill auto-extracts these from `CLAUDE.md` if present a
 | `{SCHEMA_DOC_PATH}` | Schema reference doc | `sql_library/SCHEMA.md` |
 | `{DB_ENVS}` | Named environments and their connection variables | (asks) |
 | `{READ_ONLY_ROLE}` | Postgres role with SELECT-only grants | `agentic_sql_ro` |
-| `{SAFE_PSQL_WRAPPER}` | Wrapper that applies the SQL gate; ships with the skill | `scripts/safe_psql.py` |
+| `{SAFE_PSQL_WRAPPER}` | Wrapper that applies the SQL gate; ships with the skill | `safe-psql` (runs `scripts/safe_psql.py`) |
 | `{MAX_ROWS}` | Default LIMIT injected when query has none | `1000` |
 | `{STATEMENT_TIMEOUT}` | `statement_timeout` set on the read-only role | `30s` |
 | `{DISPLAY_ROWS}` | Rows shown before offering more | `50` |
