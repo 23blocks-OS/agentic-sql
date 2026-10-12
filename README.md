@@ -12,6 +12,7 @@ It works with any Postgres and any framework you investigate through `psql`. It 
 - **Library first.** `find` searches your saved queries before any new SQL is written, so the same query is not re-derived for every ticket.
 - **One SQL gate, three layers.** A read-only Postgres role, a parser check (SQLGlot: one statement, `SELECT` only, whole tree checked, function allow-list), and a `LIMIT` added when the query has none.
 - **Ships its own wrapper.** `scripts/safe_psql.py` (launched as `safe-psql`) applies the gate, binds parameters on the server and refuses to run as a role that could write.
+- **Changing data, with a person's approval.** A separate door (`safe-psql-write`) proposes one `INSERT` or `UPDATE` (`DELETE` only if you turn hard delete on), shows a dry run that is rolled back, and applies it only after a person approves that exact statement in a terminal. It uses its own limited database login. See [reference/write.md](reference/write.md).
 - **Schema doc as source of truth.** Tables, join keys and gotchas live in a schema doc the agent reads before writing a query.
 - **Curation is a workflow step.** `curate` runs before the final report, so reusable queries are saved instead of lost in terminal history.
 
@@ -66,6 +67,7 @@ safe-psql --check-only --sql "..."       # gate only, no database
 | `/agentic-sql add` | Guided workflow for saving a new query: prompts for purpose, business case, environment, schema reference and parameters; formats the header; saves to `{QUERY_DIR}` as `kebab-case-name.sql`; updates `{INDEX_PATH}`. |
 | `/agentic-sql run <query-id-or-path>` | Execute a saved query (by ID like `Q12`) or a freshly written one through `{SAFE_PSQL_WRAPPER}`, which runs the SQL gate, injects `LIMIT` and connects as `{READ_ONLY_ROLE}`. |
 | `/agentic-sql curate` | Post-investigation review. Surface any SQL run this session that was not from the library, decide which is reusable, promote it via `add`. **Run before ending the conversation.** |
+| `/agentic-sql write <change>` | Change data through the approval-gated write door: propose, a person approves in a terminal, apply. Needs a settings file and a limited write login; see [reference/write.md](reference/write.md). |
 | `/agentic-sql schema <table-or-section>` | View or update `{SCHEMA_DOC_PATH}` for a table or section. When a new query touches an undocumented table, run this first, then add the query. |
 
 ## How it works and why it is safe
@@ -77,6 +79,8 @@ The gate has three layers, and all are required:
 3. **Row limit.** `LIMIT {MAX_ROWS}` is added when the query has none, one statement per round trip, a fresh connection per query.
 
 Read-only transactions alone have been bypassed: Anthropic's archived reference Postgres MCP server accepted multiple statements, so `COMMIT; <write>` in one string ended the read-only transaction ([Datadog Security Labs, 2025-08-21](https://securitylabs.datadoghq.com/articles/mcp-vulnerability-case-study-SQL-injection-in-the-postgresql-mcp-server/)). The wrapper has a test suite, including that trick, writes hidden in `WITH`, `SELECT INTO`, `COPY` and dangerous functions in many query positions. Gate rules and role setup: [reference/run.md](reference/run.md).
+
+The write door has its own rules and an approval step; see [reference/write.md](reference/write.md). The read command refuses any login that can write, and the write command refuses any login that can write tables you did not list.
 
 Query results are treated as untrusted data. The skill does not write result rows or personal data to files or logs, and keeps connection strings in environment variables or a secret store.
 
@@ -146,11 +150,13 @@ agentic-sql/
 ├── README.md               # this file
 ├── CHANGELOG.md
 ├── LICENSE                 # MIT
-├── requirements.txt        # sqlglot, psycopg
-├── scripts/safe_psql.py    # the read-only SQL gate wrapper
-├── tests/test_safe_psql.py
+├── requirements.txt        # sqlglot, psycopg, pyyaml
+├── scripts/safe_psql.py        # the read-only SQL gate wrapper
+├── scripts/safe_psql_write.py  # the write door: propose, approve, apply
+├── examples/write.example.yaml # settings for the write door
+├── tests/test_safe_psql.py  tests/test_safe_psql_write.py
 └── reference/              # one playbook per sub-command
-    ├── audit.md  find.md  add.md  run.md  curate.md  schema.md
+    ├── audit.md  find.md  add.md  run.md  curate.md  schema.md  write.md
 ```
 
 ## Works with
