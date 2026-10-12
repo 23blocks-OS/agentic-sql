@@ -1,25 +1,86 @@
-# agentic-sql
+# agentic-sql: Claude Code skill for safe, library-first SQL on production databases
 
-Claude Code skill for **library-first SQL investigations**. Curated read-only query library + SQL gate (read-only role, single-statement SQLGlot allow-list, LIMIT injection) + a forced post-investigation curation step that keeps the library from rotting.
+[![Claude Code skill](https://img.shields.io/badge/Claude_Code-skill-D97757)](https://docs.claude.com/en/docs/claude-code/skills)
+[![License: MIT](https://img.shields.io/github/license/23blocks-OS/agentic-sql)](LICENSE)
 
-Works with any Postgres, any framework, any backend that you investigate via psql.
+**agentic-sql is an agent skill (`SKILL.md`) that lets Claude Code run SQL against production or staging Postgres safely.** It checks a saved query library first, sends only read-only queries through a three-layer SQL gate, and saves useful findings back to the library before the session ends.
 
-> Based on:
-> - Vanna AI's saved-query RAG pattern
-> - AutoLink (arxiv 2511.17190) and LinkAlign (arxiv 2503.18596) — schema-as-retrieval
-> - LangChain SQL Toolkit's two-tier safety layer (LLM checker + AST gate)
-> - SQLGlot AST primer
-> - Cemri et al. (arxiv 2503.13657) — multi-agent failure modes (specifically "diffusion of responsibility" → why curation must be a workflow step, not "everyone's job")
+It works with any Postgres and any framework you investigate through `psql`. It is for data lookups, support-ticket investigations and data audits. It is not for sandbox databases, schema migrations or code that only builds queries.
 
-## Why this exists
+## What it does
 
-Every team with a Postgres production database has the same problem: AI agents (and humans) keep re-deriving the same queries. A support ticket lands, someone reaches for psql, writes a query, runs it, reports back, and the query dies in a terminal history file. The next ticket reaches for the same query and re-derives it from scratch — sometimes with a different join key, sometimes missing a known gotcha, sometimes touching a column that was renamed three months ago.
+- **Library first.** `find` searches your saved queries before any new SQL is written, so the same query is not re-derived for every ticket.
+- **One SQL gate, three layers.** A read-only Postgres role, a parser check (SQLGlot: one statement, `SELECT` only, whole tree checked, function allow-list), and a `LIMIT` added when the query has none.
+- **Ships its own wrapper.** `scripts/safe_psql.py` (launched as `safe-psql`) applies the gate, binds parameters on the server and refuses to run as a role that could write.
+- **Schema doc as source of truth.** Tables, join keys and gotchas live in a schema doc the agent reads before writing a query.
+- **Curation is a workflow step.** `curate` runs before the final report, so reusable queries are saved instead of lost in terminal history.
 
-Curated SQL libraries solve this — they're standard practice in mature data orgs — but they only work if the agent CONSULTS the library before writing new SQL and CURATES new findings after the investigation succeeds. Without enforcement, both steps get skipped under time pressure. The library freezes; ad-hoc scripts pile up in `scripts/audit_*.py`; the next incident the team can't find the query they wrote three months ago.
+## Install
 
-This skill makes both steps a non-negotiable part of the workflow: `find` before writing, `curate` before reporting back. Plus an SQL gate that prevents the most common production accidents (running a query as the app role, executing a hallucinated DELETE, returning millions of rows by mistake).
+### Option 1: through the AI Maestro plugin
 
-## First-Time Setup
+The skill is part of the `ai-maestro` plugin from [ai-maestro-plugins](https://github.com/23blocks-OS/ai-maestro-plugins):
+
+```bash
+claude plugin marketplace add 23blocks-OS/ai-maestro-plugins
+claude plugin install ai-maestro@ai-maestro-plugins
+```
+
+AI Maestro's installer and updater also put `safe-psql` on your PATH, in a private Python environment with the packages from `requirements.txt`. Claude Code namespaces plugin skills, so the command may appear as `/ai-maestro:agentic-sql`.
+
+### Option 2: standalone
+
+```bash
+git clone https://github.com/23blocks-OS/agentic-sql.git ~/.claude/skills/agentic-sql
+python3 -m venv ~/.aimaestro/venvs/agentic-sql
+~/.aimaestro/venvs/agentic-sql/bin/pip install -r ~/.claude/skills/agentic-sql/requirements.txt
+```
+
+Without AI Maestro there is no `safe-psql` launcher. Wherever the skill says `safe-psql`, run `~/.aimaestro/venvs/agentic-sql/bin/python ~/.claude/skills/agentic-sql/scripts/safe_psql.py`, or put a small script with that command on your PATH. If the wrapper cannot run, the skill stops instead of falling back to raw `psql`.
+
+You also need a Postgres role with `SELECT` and `USAGE` only (the wrapper refuses superusers and other roles that could write). Role setup is in [reference/run.md](reference/run.md).
+
+## Usage
+
+```
+/agentic-sql audit                       # once, to check library and schema doc paths
+/agentic-sql find "customer by email"    # always first
+/agentic-sql run Q12                     # run a saved query through the gate
+/agentic-sql curate                      # before ending the session
+```
+
+Under the hood, `run` calls the wrapper:
+
+```bash
+safe-psql --env ACME_DATABASE_URL --query-id Q12 \
+  --sql "SELECT id, email FROM users WHERE id = :id" --param id=7
+safe-psql --check-only --sql "..."       # gate only, no database
+```
+
+## Sub-commands
+
+| Command | What it does |
+|---|---|
+| `/agentic-sql find <topic>` | Search the library index for queries matching `<topic>`. Returns ranked matches with their purpose, schema references and parameters. **Always run this first.** |
+| `/agentic-sql audit` | Health-check the library: count queries, flag orphan `.sql` files not in the index, flag queries with no schema reference, list queries last touched more than 90 days ago. |
+| `/agentic-sql add` | Guided workflow for saving a new query: prompts for purpose, business case, environment, schema reference and parameters; formats the header; saves to `{QUERY_DIR}` as `kebab-case-name.sql`; updates `{INDEX_PATH}`. |
+| `/agentic-sql run <query-id-or-path>` | Execute a saved query (by ID like `Q12`) or a freshly written one through `{SAFE_PSQL_WRAPPER}`, which runs the SQL gate, injects `LIMIT` and connects as `{READ_ONLY_ROLE}`. |
+| `/agentic-sql curate` | Post-investigation review. Surface any SQL run this session that was not from the library, decide which is reusable, promote it via `add`. **Run before ending the conversation.** |
+| `/agentic-sql schema <table-or-section>` | View or update `{SCHEMA_DOC_PATH}` for a table or section. When a new query touches an undocumented table, run this first, then add the query. |
+
+## How it works and why it is safe
+
+The gate has three layers, and all are required:
+
+1. **Read-only role.** The agent connects as a Postgres role with only `SELECT` and `USAGE`, with timeouts set on the role.
+2. **Parser check.** Exactly one statement, root `SELECT`, the whole syntax tree checked, functions limited to an allow-list. The statement sent to the database is regenerated from the checked tree, not your original text.
+3. **Row limit.** `LIMIT {MAX_ROWS}` is added when the query has none, one statement per round trip, a fresh connection per query.
+
+Read-only transactions alone have been bypassed: Anthropic's archived reference Postgres MCP server accepted multiple statements, so `COMMIT; <write>` in one string ended the read-only transaction ([Datadog Security Labs, 2025-08-21](https://securitylabs.datadoghq.com/articles/mcp-vulnerability-case-study-SQL-injection-in-the-postgresql-mcp-server/)). The wrapper has a test suite, including that trick, writes hidden in `WITH`, `SELECT INTO`, `COPY` and dangerous functions in many query positions. Gate rules and role setup: [reference/run.md](reference/run.md).
+
+Query results are treated as untrusted data. The skill does not write result rows or personal data to files or logs, and keeps connection strings in environment variables or a secret store.
+
+## First-time setup
 
 On first invocation, the skill auto-extracts these from `CLAUDE.md` if present and asks for any missing values:
 
@@ -37,30 +98,21 @@ On first invocation, the skill auto-extracts these from `CLAUDE.md` if present a
 
 Values persist to `.claude/agentic-sql.yml` for the session.
 
-## Install
+## What matters
 
-```bash
-git clone https://github.com/23blocks-OS/agentic-sql.git ~/.claude/skills/agentic-sql
-```
+1. **The library is a search corpus, not a folder.** If `find` does not surface the right query, the library failed even if the query exists.
+2. **The schema doc is the source of truth, not the live DB schema.** `\d table` gives columns but no gotchas, no join keys, no "this counter drifts under condition X" notes.
+3. **The SQL gate is non-negotiable.** All three layers, every time.
+4. **Curation runs before the final report.** Cemri et al. ([arxiv 2503.13657](https://arxiv.org/pdf/2503.13657)) call "diffusion of responsibility" a leading multi-agent failure: if curation is not an explicit step, it becomes nobody's job. The skill makes it a step.
+5. **No field fallbacks.** Never use one column as a substitute for another inside a query. A NULL in the right field is a data finding to surface, not paper over.
 
-Then in any project:
+## What not to do
 
-```
-/agentic-sql audit
-```
-
-Run once after install to verify the library / schema doc paths and surface any orphan files or missing schema references.
-
-## Sub-Commands
-
-| Command | What it does |
-|---|---|
-| `/agentic-sql find <topic>` | Search the library index for queries matching `<topic>`. Returns ranked matches with their purpose, schema references, and parameters. **Always run this first.** |
-| `/agentic-sql audit` | Health-check the library: count queries, flag orphan `.sql` files not in the index, flag queries with no schema reference, list queries last touched > 90 days ago. |
-| `/agentic-sql add` | Guided workflow for saving a new query: prompts for purpose, business case, environment, schema reference, parameters; formats the header; saves to `{QUERY_DIR}` with `kebab-case-name.sql`; updates `{INDEX_PATH}`. |
-| `/agentic-sql run <query-id-or-path>` | Execute a saved query (by ID like `Q12`) or a freshly-written one. Wraps the call in `{SAFE_PSQL_WRAPPER}` which runs the SQL gate, injects `LIMIT`, and connects as `{READ_ONLY_ROLE}`. |
-| `/agentic-sql curate` | Post-investigation review. Surface any SQL run during this session that wasn't from the library, decide which are reusable, promote them via `add`. **Run before ending the conversation.** |
-| `/agentic-sql schema <table-or-section>` | View or update `{SCHEMA_DOC_PATH}` for a specific table or section. When adding a new query that touches a previously-undocumented table, run this FIRST to document the table, then add the query. |
+- Do not use this skill for application code changes. It is an investigation tool.
+- Do not use it for destructive operations (UPDATE, DELETE, INSERT). Those belong in `scripts/` as explicit one-off scripts with dry-run gating.
+- Do not skip `find` because you already know the query.
+- Do not save a query without a schema reference line in the header.
+- Do not defer curation to the end of the week. The session ends, the context dies, the queries do not get saved.
 
 ## Query categories the library should cover
 
@@ -77,53 +129,48 @@ These are the categories that tend to recur in real production work. Use them as
 | **Test-fixture selection** | Find a test account / project / PCU with a specific shape for E2E tests | QA team asks for these repeatedly |
 | **Collision / deduplication triage** | "All rows sharing canonical email/document with activity per row" | Required BEFORE any cleanup that might merge |
 
-## What matters
+## Run the tests
 
-1. **The library is a search corpus, not a folder.** If `find` doesn't surface the right query, the library failed even if the query exists.
-2. **The schema doc is the source of truth, not the live DB schema.** A `\d table` in psql gives you columns but no gotchas, no join keys, no "this counter drifts under condition X" notes. The doc accumulates institutional knowledge; the live schema only gives you syntax.
-3. **The SQL gate is non-negotiable.** Read-only role at the Postgres level + single-statement allow-list parser at the application level + LIMIT injection at the wrapper level. Read-only transactions alone have been bypassed ([Datadog Security Labs, 2025-08-21](https://securitylabs.datadoghq.com/articles/mcp-vulnerability-case-study-SQL-injection-in-the-postgresql-mcp-server/)).
-4. **Curation runs before the final report.** Cemri et al. (arxiv 2503.13657) call this out as the #1 multi-agent failure: "diffusion of responsibility" — if curation isn't an explicit step, it becomes everyone's job and therefore nobody's job. The skill makes it a step.
+```bash
+pip install -r requirements.txt pytest
+pytest tests
+```
 
-## What NOT to do
+The end-to-end tests start a throwaway local Postgres and are skipped when none is installed.
 
-- Do NOT use this skill for application code changes. It's an investigation tool.
-- Do NOT use this skill for destructive operations (UPDATE / DELETE / INSERT). Those belong in `scripts/` as explicit one-off scripts with dry-run gating.
-- Do NOT skip `find` because "I already know the query." You don't. Run it.
-- Do NOT save a query without a schema reference line in the header. The next person can't tell which tables it touches.
-- Do NOT defer curation to "end of week." The session ends, the context dies, the queries don't get saved.
-
-## File Structure
+## File structure
 
 ```
 agentic-sql/
-├── LICENSE                 # MIT
+├── SKILL.md                # skill manifest (YAML frontmatter + workflow)
 ├── README.md               # this file
-├── SKILL.md                # skill manifest (YAML frontmatter + body)
+├── CHANGELOG.md
+├── LICENSE                 # MIT
+├── requirements.txt        # sqlglot, psycopg
+├── scripts/safe_psql.py    # the read-only SQL gate wrapper
+├── tests/test_safe_psql.py
 └── reference/              # one playbook per sub-command
-    ├── audit.md
-    ├── find.md
-    ├── add.md
-    ├── run.md
-    ├── curate.md
-    └── schema.md
+    ├── audit.md  find.md  add.md  run.md  curate.md  schema.md
 ```
 
-## Key Principles
+## Works with
 
-1. **Library-first lookup is mandatory** — `find` always runs before new SQL gets written.
-2. **SQL gate, all layers required** — read-only role + parser allow-list + LIMIT injection.
-3. **Schema doc is the source of truth** — never guess columns; read the doc first.
-4. **Curation is part of the investigation** — it runs before the final report, not "later."
-5. **No field fallbacks** — never use one column as a substitute for another inside a query.
+- Postgres (the wrapper uses SQLGlot's PostgreSQL dialect and `psycopg`)
+- Any framework (Rails, Django, Node.js and others); the skill is the investigation discipline, not application code
+- Multi-database and multi-tenant setups, built for shared-cluster microservice architectures (the 23blocks platform was the original context)
 
-## Works With
+## Part of the AI Maestro ecosystem
 
-- Postgres (primary target — wrapper uses SQLGlot's PostgreSQL dialect)
-- Any framework (Rails, Django, Node.js, etc.) — the skill is the investigation discipline, not application code
-- Multi-DB / multi-tenant setups (built specifically for shared-cluster microservice architectures)
-- 23blocks platform (the original motivating context — 6 microservice DBs sharing a tenant)
+agentic-sql ships in the `ai-maestro` plugin for [AI Maestro](https://ai-maestro.23blocks.com), a dashboard and orchestrator for fleets of AI coding agents ([source on GitHub](https://github.com/23blocks-OS/ai-maestro)). It also works on its own in any Claude Code setup.
 
-Should also work with MySQL / Snowflake / BigQuery with minor wrapper changes (SQLGlot supports all of them).
+## Related skills
+
+- [agentic-support](https://github.com/23blocks-OS/agentic-support): numbered support cases and runbooks. Its runbooks hand database lookups to agentic-sql.
+- [agentic-seo](https://github.com/23blocks-OS/agentic-seo): SEO audit and implementation for websites.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md). Contributions are welcome; see [CONTRIBUTING.md](.github/CONTRIBUTING.md).
 
 ## References
 
@@ -138,8 +185,8 @@ Should also work with MySQL / Snowflake / BigQuery with minor wrapper changes (S
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
 
 ---
 
-Built by [23blocks](https://23blocks.com) — the backend-as-a-service with composable microservice blocks and agent-ready skills.
+Built by [23blocks](https://23blocks.com).
