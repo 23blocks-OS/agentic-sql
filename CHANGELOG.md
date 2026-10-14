@@ -2,6 +2,12 @@
 
 All notable changes to this skill are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.4.0] - 2026-10-14
+
+### Added
+- What an agent does after `safe-psql-write propose` (`reference/write.md`, "After you propose"): tell the person in one sentence, name the three places they can approve (AI Maestro chat card, Claude Code card, their own terminal), never run `approve`, poll `status` every 20 to 30 seconds for at most the request's lifetime, and act on `approved`, `rejected`, `expired`, `applied` and `failed`. A `[SQL WRITE]` note only means "check `status`". The honest limit is stated. Design: AI Maestro backlog F037.
+- `safe-psql-write status <id> --json` prints one JSON object (no values). The default one-line output is unchanged. 4 tests.
+
 ## [1.3.0] - 2026-10-12
 
 ### Added

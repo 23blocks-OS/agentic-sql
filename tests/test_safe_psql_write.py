@@ -492,3 +492,50 @@ def test_old_unapproved_requests_lose_their_values(env):
     d = json.loads(f.read_text()); d["expires"] = time.time() - 3600; f.write_text(json.dumps(d))
     propose(env, "UPDATE customers SET plan = 'pro' WHERE id = 4")  # any new proposal tidies up
     assert "old.person" not in f.read_text() and json.loads(f.read_text())["status"] == "expired"
+
+
+def _status_request(tmp_path, status="pending", ttl=600):
+    home = tmp_path / "home"
+    (home / "requests").mkdir(parents=True, mode=0o700)
+    rid = "w-0123456789ab"
+    req = {"id": rid, "status": status, "kind": "UPDATE", "table": "public.customers", "rows": 3, "environment": "staging",
+           "expires": time.time() + ttl, "reason": "secret reason", "params": {"p": "secret value"}}
+    (home / "requests" / (rid + ".json")).write_text(json.dumps(req))
+    e = {k: v for k, v in os.environ.items() if k not in AGENT_VARS}
+    e["SAFE_PSQL_HOME"] = str(home)
+    return rid, e
+
+
+def _status(e, *args):
+    return subprocess.run([sys.executable, WRITE, "status", *args], capture_output=True, text=True, env=e, stdin=subprocess.DEVNULL)
+
+
+def test_status_default_output_is_one_line_and_unchanged(tmp_path):
+    rid, e = _status_request(tmp_path)
+    p = _status(e, rid)
+    assert p.returncode == 0
+    assert p.stdout.startswith(f"request {rid}: pending · UPDATE public.customers · 3 row(s) · expires in ")
+    assert p.stdout.count("\n") == 1 and "{" not in p.stdout
+
+
+def test_status_json_has_the_fields_and_no_values(tmp_path):
+    rid, e = _status_request(tmp_path, status="approved")
+    p = _status(e, rid, "--json")
+    assert p.returncode == 0 and p.stdout.count("\n") == 1
+    d = json.loads(p.stdout)
+    assert set(d) == {"id", "status", "kind", "table", "rows", "environment", "expires_in"}
+    assert d["id"] == rid and d["status"] == "approved" and d["rows"] == 3 and 0 < d["expires_in"] <= 600
+    assert "secret" not in p.stdout
+
+
+def test_status_json_after_expiry_reports_zero(tmp_path):
+    rid, e = _status_request(tmp_path, ttl=-5)
+    d = json.loads(_status(e, rid, "--json").stdout)
+    assert d["expires_in"] == 0
+    assert "expired" in _status(e, rid).stdout
+
+
+def test_status_json_unknown_request_is_refused(tmp_path):
+    _, e = _status_request(tmp_path)
+    p = _status(e, "w-ffffffffffff", "--json")
+    assert p.returncode == 2 and p.stdout == ""
