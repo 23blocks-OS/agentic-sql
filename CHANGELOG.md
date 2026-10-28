@@ -2,6 +2,15 @@
 
 All notable changes to this skill are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.4.1] - 2026-10-28
+
+### Security: dependency and tooling updates, 2026-10-28
+
+- **Write door: quoted mixed-case names no longer pass the write list** (`scripts/safe_psql_write.py`, `gate_write`; severity low, defense in depth). The settings file is compared lower-case, but Postgres keeps the case of a quoted name, so `UPDATE "Customers" ...` or `SET "Plan" = ...` was read as `customers` / `plan` and passed the list while naming a different table or column. The target table and the written columns are now refused when quoted with upper-case letters. Quoted lower-case names still pass. 4 tests added.
+- Dependencies: no change needed. `pip-audit` on `requirements.txt` reports no known vulnerabilities; the resolved versions (sqlglot 30.25.0, psycopg 3.3.6, PyYAML 6.0.3) are the latest inside the existing pins. No CVE or GHSA ids apply.
+- Reviewed with no finding: the read door's statement and function allow-list (probed with file, sleep, lock, `FOR UPDATE`, writable CTE and extension calls), parameter binding, `yaml.safe_load`, argv-only handling (no shell, no pickle), request-id path checks, and secret scrubbing in error output.
+- Open, by design: the agent and the person share one user account, so the approval can be bypassed by someone who edits the request files directly (stated in `reference/write.md`). The database login's own limits are the backstop. The repository has no CI workflow, Dockerfile or Node code.
+
 ## [1.4.0] - 2026-10-14
 
 ### Added

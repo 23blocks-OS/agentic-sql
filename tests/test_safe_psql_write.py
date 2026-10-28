@@ -63,9 +63,16 @@ BAD = {
     "copy": "COPY notes TO PROGRAM 'id'",
     "set": "SET ROLE postgres",
     "commit trick": "COMMIT; DROP SCHEMA public CASCADE",
+    "quoted mixed-case table": 'UPDATE "Customers" SET plan = \'a\' WHERE id = 1',
+    "quoted mixed-case column": 'UPDATE customers SET "Plan" = \'a\' WHERE id = 1',
+    "quoted mixed-case insert column": 'INSERT INTO customers ("Name") VALUES (\'a\')',
     "empty": "",
     "garbage": "UPDAT customers",
 }
+
+
+def test_quoted_lowercase_names_still_pass():
+    assert w.gate_write('UPDATE "customers" SET "plan" = 1 WHERE id = 1', S())["table"] == "public.customers"
 
 
 @pytest.mark.parametrize("sql", OK)
